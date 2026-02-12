@@ -2,19 +2,19 @@ import feedparser
 import requests
 import time
 import os
-import re
 import json
 import sys
 import html
+import re
 from datetime import datetime, date
 from dotenv import load_dotenv 
+import pytz
+from collections import defaultdict
 
-# 加载 .env (本地调试用)
 load_dotenv()
 
-# --- 配置读取 ---
+# --- 1. 配置读取 ---
 def load_config():
-    # 获取当前脚本绝对路径，确保在任何目录下运行都能找到 config.json
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)
     config_path = os.path.join(project_root, 'config.json')
@@ -26,12 +26,12 @@ def load_config():
     with open(config_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
-# 获取环境变量
 BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") 
 CHAT_ID = os.environ.get("TG_CHAT_ID")
 
-def get_rss_url(categories):
-    category_str = "+".join(categories)
+def get_rss_url(all_categories):
+    unique_cats = list(set(all_categories))
+    category_str = "+".join(unique_cats)
     return f"http://export.arxiv.org/rss/{category_str}"
 
 def send_telegram_message(message):
@@ -50,27 +50,47 @@ def send_telegram_message(message):
         response = requests.post(url, json=payload)
         response.raise_for_status()
     except Exception as e:
-        print(f"\n!! 发送失败: {e}")
-        # ---------------- 关键调试信息 ----------------
-        print(f"❌ Telegram 返回的错误详情: {response.text}")
-        print("-" * 30)
-        print(f"📦 我尝试发送的内容:\n{payload['text']}")
-        print("-" * 30)
-        # --------------------------------------------
+        print(f"!! 发送失败: {e}")
 
-import html
-import re
+def is_today(entry_date_struct):
+    entry_date = date(entry_date_struct.tm_year, entry_date_struct.tm_mon, entry_date_struct.tm_mday)
+    today = datetime.utcnow().date()
+    return entry_date == today
 
-def format_entry(entry, max_length):
-    # 1. 基础清洗：去除标题换行
+def get_paper_tags(entry):
+    try:
+        return [t['term'] for t in entry.tags]
+    except (AttributeError, KeyError):
+        return []
+
+# --- 关键词检查函数 ---
+def check_keywords(entry, keywords):
+    """
+    检查标题和摘要是否包含关键词。
+    返回匹配到的第一个关键词，如果没有匹配则返回 None。
+    (不区分大小写)
+    """
+    if not keywords:
+        return None
+        
+    # 组合标题和摘要进行搜索
+    text_to_search = (entry.title + " " + entry.summary).lower()
+    
+    for kw in keywords:
+        if kw.lower() in text_to_search:
+            return kw # 返回匹配到的词
+            
+    return None
+
+# --- 2. 详细版消息格式 (含摘要) ---
+def format_entry_detailed(entry, max_length=800, matched_keyword=None):
     title = html.escape(entry.title.replace('\n', ' ').strip())
     authors = html.escape(entry.author)
     
-    # 2. 深度清洗摘要
+    # 摘要清洗
     raw_summary = entry.summary.replace('\n', ' ')
     clean_text = re.sub(r'<[^>]+>', '', raw_summary).strip()
     
-    # 正则提取 ID, Type, Abstract
     pattern = r'arXiv:([^\s]+)\s+Announce Type:\s+(.*?)\s+Abstract:\s+(.*)'
     match = re.search(pattern, clean_text, re.IGNORECASE)
     
@@ -81,101 +101,143 @@ def format_entry(entry, max_length):
         paper_type = match.group(2).strip()
         abstract_text = match.group(3).strip()
     
-    # 3. [新增] 提取分类标签 (cs.GT, cs.DS 等)
-    # feedparser 解析的 tags 是一个 list of dict: [{'term': 'cs.GT', ...}, ...]
-    try:
-        # 获取所有标签的 term
-        tags_list = [t['term'] for t in entry.tags]
-        # 过滤掉可能的无关标签（ArXiv 比较干净，通常都是分类号）
-        tags_str = ", ".join(tags_list)
-    except (AttributeError, KeyError):
-        tags_str = "Unknown"
+    tags = get_paper_tags(entry)
+    tags_str = ", ".join(tags)
 
-    # 4. 截断摘要
     if len(abstract_text) > max_length:
         abstract_text = abstract_text[:max_length] + "..."
     
-    # 5. 转义
     summary = html.escape(abstract_text)
     
-    # 6. 链接处理
     abs_link = entry.link
     pdf_link = abs_link.replace("/abs/", "/pdf/") + ".pdf"
     
-    # 7. 生成标签样式
     type_emoji = "🆕" if "new" in paper_type.lower() else "🔄"
     type_label = f"<code>[{paper_type.upper()}]</code>"
-    tags_label = f"🏷 <code>{tags_str}</code>" # [新增] 分类标签样式
+    tags_label = f"🏷 <code>{tags_str}</code>"
     
-    # 8. 构建消息
+    # [新增] 如果是因为关键词升级的，显示特殊标签
+    keyword_label = ""
+    if matched_keyword:
+        keyword_label = f"\n🎯 <b>Keyword Match:</b> <code>{matched_keyword}</code>"
+    
     msg = (
         f"<b>📄 {title}</b>\n"
-        f"{type_emoji} {type_label} | {tags_label}\n\n"  # [修改] 把分类加在这一行
+        f"{type_emoji} {type_label} | {tags_label}{keyword_label}\n\n"
         f"<b>👥 Authors:</b> {authors}\n\n"
         f"<b>📝 Abstract:</b>\n{summary}\n\n"
         f"🔗 <a href='{pdf_link}'>PDF Download</a> | <a href='{abs_link}'>Abs Page</a>"
     )
     return msg
 
-def is_today(entry_date_struct):
-    """判断文章日期是否是今天 (UTC)"""
-    # feedparser 解析的时间是 time.struct_time
-    # 我们将其转换为 date 对象
-    entry_date = date(entry_date_struct.tm_year, entry_date_struct.tm_mon, entry_date_struct.tm_mday)
-    today = datetime.utcnow().date()
-    return entry_date == today
-
-def main():
-    # 1. 加载配置
-    config = load_config()
-    categories = config.get("categories", [])
-    # 获取 max_items，如果没写则默认为 0
-    max_items = config.get("max_items", 0)
-    summary_length = config.get("summary_length", 800)
-    
-    if not categories:
-        print("错误: 配置文件中没有 categories")
-        sys.exit(1)
-
-    # 2. 获取 RSS
-    rss_url = get_rss_url(categories)
-    print(f"正在获取 RSS: {rss_url}")
-    
-    feed = feedparser.parse(rss_url)
-    total_entries = len(feed.entries)
-    print(f"获取到 {total_entries} 篇文章")
-    
-    if total_entries == 0:
-        print("没有新文章。")
+# --- 3. 批量发送 Digest ---
+def send_digest_messages(simple_buffer):
+    if not simple_buffer:
         return
 
-    # 3. 遍历并发送
-    print(f"限制数量: {'无限制' if max_items == 0 else max_items}")
+    all_lines = []
+    header = "<b>🗞️ Daily Digest (Other Categories)</b>\n"
+    all_lines.append(header)
 
-    print(f"当前 UTC 日期: {datetime.utcnow().date()}")
+    for category, entries in simple_buffer.items():
+        cat_header = f"\n<b>📂 {category}</b>\n"
+        all_lines.append(cat_header)
+
+        for entry in entries:
+            title = html.escape(entry.title.replace('\n', ' ').strip())
+            authors_full = html.escape(entry.author)
+            pdf_link = entry.link.replace("/abs/", "/pdf/") + ".pdf"
+            
+            line = f"🔹 <a href='{pdf_link}'>{title}</a>\n    <i>{authors_full}</i>\n"
+            all_lines.append(line)
+
+    MAX_LENGTH = 4000
+    current_message = ""
+    
+    for line in all_lines:
+        if len(current_message) + len(line) > MAX_LENGTH:
+            send_telegram_message(current_message)
+            time.sleep(1)
+            current_message = line
+        else:
+            current_message += line
+            
+    if current_message:
+        send_telegram_message(current_message)
+
+def main():
+    config = load_config()
+    
+    detailed_categories = config.get("detailed_categories", [])
+    digest_categories = config.get("digest_categories", [])
+    keywords = config.get("keywords", [])
+    summary_length = config.get("summary_length", 800)
+    
+    all_categories = detailed_categories + digest_categories
+    
+    if not all_categories:
+        print("提示: detailed_categories 和 digest_categories 均为空，无任务。")
+        sys.exit(0)
+
+    utc_now = datetime.now(pytz.utc)
+
+    rss_url = get_rss_url(all_categories)
+    print(f"正在获取 RSS: {len(all_categories)} 个分类...")
+    feed = feedparser.parse(rss_url)
+    print(f"获取到 {len(feed.entries)} 篇文章")
 
     count = 0
+    detailed_count = 0
+    simple_buffer = defaultdict(list)
+
     for entry in feed.entries:
-        # 1. 检查数量限制
-        if max_items > 0 and count >= max_items:
-            break
-            
-        # 2. [新增] 检查日期：如果不是今天发布的，就跳过
-        # 注意：ArXiv 的 RSS 里 published_parsed 是 UTC 时间
         if not is_today(entry.published_parsed):
-            print(f"跳过旧文章: {entry.title[:20]}... ({entry.published[:10]})")
             continue
 
-        print(f"[{count+1}] 正在发送: {entry.title[:30]}...")
-        msg = format_entry(entry, summary_length)
-        send_telegram_message(msg)
-        count += 1
-        time.sleep(1) 
+        paper_tags = get_paper_tags(entry)
+         
+        # 1. 先检查是否属于核心精读分类 (Detailed)
+        # 如果命中，直接发送，不做关键词检查 (节省时间)
+        if any(tag in detailed_categories for tag in paper_tags):
+            print(f"[{count+1}] 发送 (详细 - 核心): {entry.title[:30]}...")
+            # 注意：这里 matched_keyword 传 None，因为我们为了省时间没去查
+            msg = format_entry_detailed(entry, max_length=summary_length, matched_keyword=None)
+            send_telegram_message(msg)
+            detailed_count += 1
+            time.sleep(1)
+            
+        # 2. 如果不属于精读，再检查是否属于泛读分类 (Digest)
+        elif any(tag in digest_categories for tag in paper_tags):
+            
+            # 只有在它是 Digest 候选时，才去跑关键词检查 (Lazy Check)
+            matched_keyword = check_keywords(entry, keywords)
+            
+            if matched_keyword:
+                # 命中关键词 -> 升级为详细发送
+                print(f"[{count+1}] 发送 (详细 - 关键词升级: {matched_keyword}): {entry.title[:30]}...")
+                msg = format_entry_detailed(entry, max_length=summary_length, matched_keyword=matched_keyword)
+                send_telegram_message(msg)
+                detailed_count += 1
+                time.sleep(1)
+            else:
+                # 没命中关键词 -> 也就是普通的 Digest
+                target_cat = next((tag for tag in paper_tags if tag in digest_categories), "Others")
+                print(f"[{count+1}] 缓存 (Digest -> {target_cat}): {entry.title[:30]}...")
+                simple_buffer[target_cat].append(entry)
+        
+        # 3. 既不在 Detailed 也不在 Digest (可能是 RSS 带来的无关交叉引用) -> 跳过
+        else:
+            continue
 
-    if count == 0:
-        print("今天没有新文章 (可能是周末或 ArXiv 尚未更新)。")
-    else:
-        print(f"任务完成，共推送 {count} 篇")
+        count += 1
+
+    # 循环结束后发送 Digest
+    if simple_buffer:
+        print(f"正在构建并发送 Digest...")
+        send_digest_messages(simple_buffer)
+
+    print(f"任务完成。共处理 {count} 篇 (详细: {detailed_count}, 简报: {count - detailed_count})")
+
 
 if __name__ == "__main__":
     main()
