@@ -48,7 +48,7 @@ To run this bot, you need to configure your sensitive secrets (Token/ID) and you
 
 Create a file named .env in the root directory and add your credentials. This file is ignored by Git to keep your secrets safe.
 
-```toml
+```ini
 # .env
 TG_BOT_TOKEN=[YOUR TOKEN]
 TG_CHAT_ID=[YOUR ID]
