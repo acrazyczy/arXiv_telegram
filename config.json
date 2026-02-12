@@ -1,0 +1,18 @@
+{
+  "detailed_categories": [
+  ],
+  "digest_categories": [
+    "cs.DS",
+    "cs.CC",
+    "cs.DM",
+    "cs.GT"
+  ],
+  "keywords": [
+    "distortion",
+    "voting",
+    "matching",
+    "discrepancy"
+  ],
+  "max_items": 0,
+  "summary_length":800
+}
