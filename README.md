@@ -61,10 +61,10 @@ To run this automatically on GitHub, you must add these secrets to your reposito
 3. Click **New repository secret**.
 4. Add the following secrets:
 - **Name**: `TG_BOT_TOKEN`
-- - **Value**: Paste your Telegram Bot Token here
+    - **Value**: Paste your Telegram Bot Token here
 
 - **Name**: `TG_CHAT_ID`
-- - **Value**: Paste your User or Group ID here
+    - **Value**: Paste your User or Group ID here
 
 ### Subscription Settings (`config.json`)
 You can customize the bot's behavior by editing the `config.json` file in the root directory.
